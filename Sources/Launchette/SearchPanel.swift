@@ -2,10 +2,35 @@ import Cocoa
 
 // MARK: - Search result model
 
+// MARK: - Panel size
+
+enum ScreenMode: Int, CaseIterable {
+	case mouseScreen = 0, frontWindow = 1
+
+	var label: String { ["Mouse Screen", "Front Window Screen"][rawValue] }
+}
+
+enum PanelSize: Int, CaseIterable {
+	case small = 0, medium = 1, large = 2
+
+	var label: String { ["Small", "Medium", "Large"][rawValue] }
+	var iconDim: CGFloat { [24, 36, 48][rawValue] }
+	var rowHeight: CGFloat { [44, 56, 72][rawValue] }
+	var titleFont: CGFloat { [13, 15, 18][rawValue] }
+	var subFont: CGFloat { [10, 11, 12][rawValue] }
+	var maxVisible: Int { [10, 8, 6][rawValue] }
+	var searchIconSize: CGFloat { [18, 22, 28][rawValue] }
+}
+
+// MARK: - Search result model
+
 struct SearchResult {
 	let icon: NSImage
 	let title: String
-	let subtitle: String
+	let version: String
+	let displayPath: String
+	let status: String
+	let hidePath: String?
 	let action: () -> Void
 }
 
@@ -61,8 +86,9 @@ class VerticalCenterTextFieldCell: NSTextFieldCell {
 
 // MARK: - Search panel
 
-class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
+class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
 	private let searchField: NSTextField
+	private let searchIcon: NSImageView
 	private let resultsTable: PassthroughTableView
 	private let scrollView: NSScrollView
 	private let visualEffect: NSVisualEffectView
@@ -71,16 +97,64 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 	private var results: [SearchResult] = []
 	private var previousApp: NSRunningApplication?
 
-	private let panelWidth: CGFloat = 680
+	private let panelWidth: CGFloat = 561
+	private let strokeColor = NSColor(red: 0xFA/255.0, green: 0xF4/255.0, blue: 0x9A/255.0, alpha: 1.0)
 	private let searchFieldHeight: CGFloat = 48
-	private let rowHeight: CGFloat = 44
-	private let maxVisibleRows = 8
 	private let pad: CGFloat = 8
 	private let gutter: CGFloat = 20
+	private(set) var currentSize: PanelSize
+	private(set) var screenMode: ScreenMode
+
+	static func makeLaunchetteIcon(size: CGFloat, tint: NSColor? = nil) -> NSImage {
+		let config = NSImage.SymbolConfiguration(pointSize: size, weight: .medium)
+
+		let glass = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)!
+		let renderedGlass = glass.withSymbolConfiguration(config) ?? glass
+		let glassSize = renderedGlass.size
+
+		let bolt = "\u{26A1}\u{FE0F}"
+		let boltFont = NSFont.systemFont(ofSize: size * 0.75)
+		let boltAttrs: [NSAttributedString.Key: Any] = [.font: boltFont]
+		let boltStr = NSAttributedString(string: bolt, attributes: boltAttrs)
+		let boltSize = boltStr.size()
+
+		let canvasW = max(glassSize.width, boltSize.width)
+		let canvasH = max(glassSize.height, boltSize.height)
+		let img = NSImage(size: NSSize(width: canvasW, height: canvasH))
+		img.lockFocus()
+
+		// Draw magnifying glass centered
+		let glassX = (canvasW - glassSize.width) / 2
+		let glassY = (canvasH - glassSize.height) / 2
+		if let color = tint {
+			let tinted = renderedGlass.copy() as! NSImage
+			tinted.lockFocus()
+			color.set()
+			NSRect(origin: .zero, size: glassSize).fill(using: .sourceAtop)
+			tinted.unlockFocus()
+			tinted.draw(at: NSPoint(x: glassX, y: glassY), from: .zero, operation: .sourceOver, fraction: 1.0)
+		} else {
+			renderedGlass.draw(at: NSPoint(x: glassX, y: glassY), from: .zero, operation: .sourceOver, fraction: 1.0)
+		}
+
+		// Draw bolt pinned top-left
+		let boltX: CGFloat = 0
+		let boltY = canvasH - boltSize.height - 1
+		boltStr.draw(at: NSPoint(x: boltX, y: boltY))
+
+		img.unlockFocus()
+		return img
+	}
+
+	private var rowHeight: CGFloat { currentSize.rowHeight }
+	private var maxVisibleRows: Int { currentSize.maxVisible }
 
 	init(appIndex: AppIndex) {
 		self.appIndex = appIndex
+		self.currentSize = PanelSize(rawValue: UserDefaults.standard.integer(forKey: "panelSize")) ?? .medium
+		self.screenMode = ScreenMode(rawValue: UserDefaults.standard.integer(forKey: "screenMode")) ?? .mouseScreen
 		searchField = NSTextField()
+		searchIcon = NSImageView()
 		resultsTable = PassthroughTableView()
 		scrollView = NSScrollView()
 		visualEffect = NSVisualEffectView()
@@ -119,19 +193,21 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 		visualEffect.wantsLayer = true
 		visualEffect.layer?.cornerRadius = 12
 		visualEffect.layer?.masksToBounds = true
+		visualEffect.layer?.borderWidth = 1.5
+		visualEffect.layer?.borderColor = strokeColor.cgColor
 		contentView?.addSubview(visualEffect)
 
-		// Search icon
-		let iconSize: CGFloat = 22
-		let iconY = bounds.height - pad - searchFieldHeight + (searchFieldHeight - iconSize) / 2
-		let searchIcon = NSImageView(frame: NSRect(x: gutter, y: iconY, width: iconSize, height: iconSize))
-		searchIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
-		searchIcon.contentTintColor = .secondaryLabelColor
+		// Search icon (scales with size setting)
+		let iconSz = currentSize.searchIconSize
+		let iconY = bounds.height - pad - searchFieldHeight + (searchFieldHeight - iconSz) / 2
+		searchIcon.frame = NSRect(x: gutter, y: iconY, width: iconSz, height: iconSz)
+		searchIcon.image = Self.makeLaunchetteIcon(size: iconSz, tint: .secondaryLabelColor)
+		searchIcon.imageScaling = .scaleProportionallyUpOrDown
 		searchIcon.autoresizingMask = [.minYMargin]
 		visualEffect.addSubview(searchIcon)
 
 		// Search field (vertically centered in the search area)
-		let fieldX = gutter + iconSize + pad
+		let fieldX = gutter + iconSz + pad
 		let fieldY = bounds.height - pad - searchFieldHeight
 		searchField.frame = NSRect(x: fieldX, y: fieldY, width: bounds.width - fieldX - gutter, height: searchFieldHeight)
 		searchField.autoresizingMask = [.width, .minYMargin]
@@ -174,6 +250,10 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 		resultsTable.target = self
 		resultsTable.action = #selector(tableClicked)
 
+		let contextMenu = NSMenu()
+		contextMenu.delegate = self
+		resultsTable.menu = contextMenu
+
 		scrollView.documentView = resultsTable
 		scrollView.hasVerticalScroller = false
 		scrollView.hasHorizontalScroller = false
@@ -193,7 +273,13 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 		results = []
 		resultsTable.reloadData()
 
-		guard let screen = NSScreen.main else { return }
+		let screen: NSScreen
+		if screenMode == .mouseScreen {
+			let mouseLocation = NSEvent.mouseLocation
+			screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main!
+		} else {
+			screen = NSScreen.main ?? NSScreen.screens[0]
+		}
 		let sf = screen.visibleFrame
 		let h = searchFieldHeight + pad * 2
 		let x = sf.midX - panelWidth / 2
@@ -237,7 +323,10 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 					icon: NSImage(systemSymbolName: "equal.circle.fill", accessibilityDescription: "Math")
 						?? NSImage(),
 					title: "= \(resultStr)",
-					subtitle: "Copy to clipboard",
+					version: "",
+					displayPath: "",
+					status: "Copy to clipboard",
+					hidePath: nil,
 					action: {
 						NSPasteboard.general.clearContents()
 						NSPasteboard.general.setString(resultStr, forType: .string)
@@ -248,11 +337,15 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 			// Apps
 			for app in appIndex.search(query: query) {
 				let entry = app
+				let idx = appIndex
 				results.append(SearchResult(
 					icon: entry.icon,
 					title: entry.name,
-					subtitle: entry.isRunning ? "Running" : "",
-					action: { entry.launch() }
+					version: entry.version,
+					displayPath: entry.displayPath,
+					status: entry.isRunning ? "Running" : "",
+					hidePath: entry.path,
+					action: { idx.launchApp(entry) }
 				))
 			}
 		}
@@ -348,30 +441,69 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 
 	func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
 		let result = results[row]
+		let sz = currentSize
+		let rh = sz.rowHeight
+		let iconDim = sz.iconDim
+		let titleFS = sz.titleFont
+		let subFS = sz.subFont
+		let cellW = panelWidth - pad * 2
+		let rightEdge = cellW - gutter * 2
+
 		let cell = NSView()
 
-		let iconView = NSImageView(frame: NSRect(x: gutter, y: 6, width: 32, height: 32))
+		// Icon -- vertically centered
+		let iconY = (rh - iconDim) / 2
+		let iconView = NSImageView(frame: NSRect(x: gutter, y: iconY, width: iconDim, height: iconDim))
 		iconView.image = result.icon
 		iconView.imageScaling = .scaleProportionallyUpOrDown
 		cell.addSubview(iconView)
 
+		let textX = gutter + iconDim + 10
+		let titleH = ceil(titleFS * 1.4)
+		let subH = ceil(subFS * 1.4)
+		let gap: CGFloat = 1
+		let hasBottom = !result.displayPath.isEmpty || !result.status.isEmpty
+		let groupH = hasBottom ? titleH + gap + subH : titleH
+		let groupBot = (rh - groupH) / 2
+		let topY = groupBot + (hasBottom ? subH + gap : 0)
+		let botY = groupBot
+
+		// Top line left: title
 		let titleLabel = NSTextField(labelWithString: result.title)
-		titleLabel.frame = NSRect(x: gutter + 40, y: 12, width: 400, height: 22)
-		titleLabel.font = .systemFont(ofSize: 16)
+		titleLabel.frame = NSRect(x: textX, y: topY, width: rightEdge - textX, height: titleH)
+		titleLabel.font = .systemFont(ofSize: titleFS, weight: .medium)
 		titleLabel.textColor = .labelColor
 		titleLabel.lineBreakMode = .byTruncatingTail
 		cell.addSubview(titleLabel)
 
-		if !result.subtitle.isEmpty {
-			let subLabel = NSTextField(labelWithString: result.subtitle)
-			subLabel.font = .systemFont(ofSize: 12)
-			subLabel.textColor = .secondaryLabelColor
-			subLabel.sizeToFit()
-			subLabel.frame.origin = NSPoint(
-				x: panelWidth - pad * 2 - gutter * 2 - subLabel.frame.width,
-				y: 15
-			)
-			cell.addSubview(subLabel)
+		// Top line right: version
+		if !result.version.isEmpty {
+			let verLabel = NSTextField(labelWithString: result.version)
+			verLabel.font = .monospacedDigitSystemFont(ofSize: subFS, weight: .regular)
+			verLabel.textColor = .secondaryLabelColor
+			verLabel.sizeToFit()
+			verLabel.frame.origin = NSPoint(x: rightEdge - verLabel.frame.width, y: topY + 2)
+			cell.addSubview(verLabel)
+		}
+
+		// Bottom line left: path
+		if !result.displayPath.isEmpty {
+			let pathLabel = NSTextField(labelWithString: result.displayPath)
+			pathLabel.font = .systemFont(ofSize: subFS)
+			pathLabel.textColor = .secondaryLabelColor
+			pathLabel.lineBreakMode = .byTruncatingMiddle
+			pathLabel.frame = NSRect(x: textX, y: botY, width: rightEdge - textX - 80, height: subH)
+			cell.addSubview(pathLabel)
+		}
+
+		// Bottom line right: status
+		if !result.status.isEmpty {
+			let statusLabel = NSTextField(labelWithString: result.status)
+			statusLabel.font = .systemFont(ofSize: subFS)
+			statusLabel.textColor = .secondaryLabelColor
+			statusLabel.sizeToFit()
+			statusLabel.frame.origin = NSPoint(x: rightEdge - statusLabel.frame.width, y: botY)
+			cell.addSubview(statusLabel)
 		}
 
 		return cell
@@ -379,5 +511,56 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 
 	func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
 		rowHeight
+	}
+
+	// MARK: NSMenuDelegate (right-click context menu)
+
+	func menuNeedsUpdate(_ menu: NSMenu) {
+		menu.removeAllItems()
+		let row = resultsTable.clickedRow
+		guard row >= 0, row < results.count, let path = results[row].hidePath else { return }
+		let item = NSMenuItem(
+			title: "Hide \"\(results[row].title)\"",
+			action: #selector(hideAppClicked(_:)), keyEquivalent: ""
+		)
+		item.target = self
+		item.representedObject = path
+		menu.addItem(item)
+	}
+
+	@objc private func hideAppClicked(_ sender: NSMenuItem) {
+		guard let path = sender.representedObject as? String else { return }
+		appIndex.hideApp(path: path)
+		updateResults()
+	}
+
+	// MARK: Size
+
+	func setSize(_ size: PanelSize) {
+		currentSize = size
+		UserDefaults.standard.set(size.rawValue, forKey: "panelSize")
+
+		// Resize search icon
+		let iconSz = size.searchIconSize
+		let iconY = searchIcon.superview!.bounds.height - pad - searchFieldHeight + (searchFieldHeight - iconSz) / 2
+		searchIcon.frame = NSRect(x: gutter, y: iconY, width: iconSz, height: iconSz)
+		searchIcon.image = Self.makeLaunchetteIcon(size: iconSz, tint: .secondaryLabelColor)
+
+		// Reposition search field
+		let fieldX = gutter + iconSz + pad
+		var sf = searchField.frame
+		sf.origin.x = fieldX
+		sf.size.width = visualEffect.bounds.width - fieldX - gutter
+		searchField.frame = sf
+
+		resultsTable.reloadData()
+		if isVisible {
+			updatePanelSize()
+		}
+	}
+
+	func setScreenMode(_ mode: ScreenMode) {
+		screenMode = mode
+		UserDefaults.standard.set(mode.rawValue, forKey: "screenMode")
 	}
 }

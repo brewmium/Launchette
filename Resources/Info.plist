@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.brewmium.Launchette</string>
+	<string>com.brewmium.launchette</string>
 	<key>CFBundleName</key>
 	<string>Launchette</string>
 	<key>CFBundleDisplayName</key>

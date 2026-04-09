@@ -6,9 +6,21 @@ struct AppEntry {
 	let name: String
 	let path: String
 	let bundleIdentifier: String?
+	let version: String
 	let icon: NSImage
 	var isRunning: Bool
 	let isCustom: Bool
+
+	var displayPath: String {
+		let parent = (path as NSString).deletingLastPathComponent
+		let home = NSHomeDirectory()
+		if parent.hasPrefix(home) {
+			let rest = String(parent.dropFirst(home.count))
+			if rest.isEmpty { return "Home" }
+			return String(rest.dropFirst()) // strip leading /
+		}
+		return parent
+	}
 
 	func launch() {
 		let url = URL(fileURLWithPath: path)
@@ -23,14 +35,22 @@ struct AppEntry {
 class AppIndex {
 	private var apps: [AppEntry] = []
 	private var customAppPaths: Set<String> = []
+	private var usageCounts: [String: Int] = [:]
+	private var hiddenPaths: Set<String> = []
 	private let customAppsURL: URL
+	private let usageURL: URL
+	private let hiddenURL: URL
 
 	init() {
 		let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
 		let dir = appSupport.appendingPathComponent("Launchette")
 		try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 		customAppsURL = dir.appendingPathComponent("custom_apps.json")
+		usageURL = dir.appendingPathComponent("usage_cache.json")
+		hiddenURL = dir.appendingPathComponent("hidden_apps.json")
 		loadCustomApps()
+		loadUsage()
+		loadHidden()
 	}
 
 	// MARK: Scanning
@@ -91,13 +111,15 @@ class AppIndex {
 			?? bundle?.infoDictionary?["CFBundleName"] as? String
 			?? fallbackName
 		let bundleID = bundle?.bundleIdentifier
+		let version = bundle?.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
 		let icon = NSWorkspace.shared.icon(forFile: path)
-		icon.size = NSSize(width: 32, height: 32)
+		icon.size = NSSize(width: 48, height: 48)
 
 		return AppEntry(
 			name: displayName,
 			path: path,
 			bundleIdentifier: bundleID,
+			version: version,
 			icon: icon,
 			isRunning: false,
 			isCustom: isCustom
@@ -122,6 +144,8 @@ class AppIndex {
 		var matches: [(entry: AppEntry, score: Int)] = []
 
 		for app in apps {
+			guard !hiddenPaths.contains(app.path) else { continue }
+
 			let name = app.name.lowercased()
 			var score = 0
 
@@ -138,11 +162,16 @@ class AppIndex {
 			}
 
 			if app.isRunning { score += 20 }
+			let usage = min(usageCounts[app.path] ?? 0, 10)
+			score += usage * 5
 			matches.append((app, score))
 		}
 
 		return matches
-			.sorted { $0.score > $1.score }
+			.sorted {
+				if $0.score != $1.score { return $0.score > $1.score }
+				return $0.entry.version.compare($1.entry.version, options: .numeric) == .orderedDescending
+			}
 			.prefix(8)
 			.map { $0.entry }
 	}
@@ -157,6 +186,79 @@ class AppIndex {
 			ti = target.index(after: ti)
 		}
 		return qi == query.endIndex
+	}
+
+	// MARK: Launch and record
+
+	func launchApp(_ entry: AppEntry) {
+		usageCounts[entry.path, default: 0] += 1
+		saveUsage()
+		entry.launch()
+	}
+
+	// MARK: Hidden apps
+
+	func hideApp(path: String) {
+		hiddenPaths.insert(path)
+		saveHidden()
+	}
+
+	func unhideApp(path: String) {
+		hiddenPaths.remove(path)
+		saveHidden()
+	}
+
+	func getHiddenApps() -> [(name: String, path: String)] {
+		hiddenPaths.compactMap { path in
+			let name = apps.first(where: { $0.path == path })?.name
+				?? URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+			return (name: name, path: path)
+		}
+		.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+	}
+
+	private func loadHidden() {
+		guard let data = try? Data(contentsOf: hiddenURL),
+			let paths = try? JSONDecoder().decode([String].self, from: data)
+		else { return }
+		hiddenPaths = Set(paths)
+	}
+
+	private func saveHidden() {
+		guard let data = try? JSONEncoder().encode(Array(hiddenPaths)) else { return }
+		try? data.write(to: hiddenURL)
+	}
+
+	// MARK: Usage management
+
+	func getRecentApps() -> [(name: String, path: String, count: Int)] {
+		usageCounts
+			.filter { $0.value > 0 }
+			.compactMap { (path, count) in
+				let name = apps.first(where: { $0.path == path })?.name
+					?? URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+				return (name: name, path: path, count: count)
+			}
+			.sorted { $0.count > $1.count }
+	}
+
+	func clearUsage(forPath path: String) {
+		usageCounts.removeValue(forKey: path)
+		saveUsage()
+	}
+
+	// MARK: Usage cache
+
+	private func loadUsage() {
+		guard let data = try? Data(contentsOf: usageURL),
+			let counts = try? JSONDecoder().decode([String: Int].self, from: data)
+		else { return }
+		usageCounts = counts
+	}
+
+	private func saveUsage() {
+		guard let data = try? JSONEncoder().encode(usageCounts) else { return }
+		try? data.write(to: usageURL)
 	}
 
 	// MARK: Custom apps

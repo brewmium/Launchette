@@ -26,6 +26,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 	private var eventHandlerRef: EventHandlerRef?
 	private var hotKeyMenuItem: NSMenuItem!
 	private var loginItem: NSMenuItem!
+	private var sizeMenuItems: [NSMenuItem] = []
+	private var screenMenuItems: [NSMenuItem] = []
 
 	// MARK: Lifecycle
 
@@ -35,6 +37,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 		installEventHandler()
 		registerHotKey()
 		searchPanel = SearchPanel(appIndex: appIndex)
+		updateSizeCheckmarks()
+		updateScreenCheckmarks()
 		appIndex.scan()
 
 		let nc = NSWorkspace.shared.notificationCenter
@@ -49,7 +53,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 	private func setupMenuBar() {
 		statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 		if let button = statusItem.button {
-			button.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Launchette")
+			let icon = SearchPanel.makeLaunchetteIcon(size: 18, tint: NSColor.white.withAlphaComponent(0.7))
+			icon.isTemplate = false
+			button.image = icon
 		}
 
 		let menu = NSMenu()
@@ -67,6 +73,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 		let rescanItem = NSMenuItem(title: "Rescan Applications", action: #selector(rescan), keyEquivalent: "")
 		rescanItem.target = self
 		menu.addItem(rescanItem)
+
+		menu.addItem(NSMenuItem.separator())
+
+		let sizeMenu = NSMenu()
+		for size in PanelSize.allCases {
+			let item = NSMenuItem(title: size.label, action: #selector(changeSize(_:)), keyEquivalent: "")
+			item.target = self
+			item.tag = size.rawValue
+			sizeMenu.addItem(item)
+			sizeMenuItems.append(item)
+		}
+		let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
+		sizeItem.submenu = sizeMenu
+		menu.addItem(sizeItem)
+
+		let screenMenu = NSMenu()
+		for mode in ScreenMode.allCases {
+			let item = NSMenuItem(title: mode.label, action: #selector(changeScreenMode(_:)), keyEquivalent: "")
+			item.target = self
+			item.tag = mode.rawValue
+			screenMenu.addItem(item)
+			screenMenuItems.append(item)
+		}
+		let screenItem = NSMenuItem(title: "Open On", action: nil, keyEquivalent: "")
+		screenItem.submenu = screenMenu
+		menu.addItem(screenItem)
+
+		let manageItem = NSMenuItem(title: "Manage Apps...", action: #selector(showManageApps), keyEquivalent: "")
+		manageItem.target = self
+		menu.addItem(manageItem)
 
 		menu.addItem(NSMenuItem.separator())
 
@@ -235,6 +271,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 		appIndex.scan()
 	}
 
+	@objc private func changeSize(_ sender: NSMenuItem) {
+		guard let size = PanelSize(rawValue: sender.tag) else { return }
+		searchPanel.setSize(size)
+		updateSizeCheckmarks()
+	}
+
+	private func updateSizeCheckmarks() {
+		let current = searchPanel.currentSize
+		for item in sizeMenuItems {
+			item.state = item.tag == current.rawValue ? .on : .off
+		}
+	}
+
+	@objc private func changeScreenMode(_ sender: NSMenuItem) {
+		guard let mode = ScreenMode(rawValue: sender.tag) else { return }
+		searchPanel.setScreenMode(mode)
+		updateScreenCheckmarks()
+	}
+
+	private func updateScreenCheckmarks() {
+		let current = searchPanel.screenMode
+		for item in screenMenuItems {
+			item.state = item.tag == current.rawValue ? .on : .off
+		}
+	}
+
 	@objc private func toggleLaunchAtLogin() {
 		do {
 			if SMAppService.mainApp.status == .enabled {
@@ -249,12 +311,172 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 		}
 	}
 
+	@objc private func showManageApps() {
+		let panel = ManageAppsPanel(appIndex: appIndex)
+		NSApp.activate(ignoringOtherApps: true)
+		panel.makeKeyAndOrderFront(nil)
+	}
+
 	@objc private func quit() {
 		NSApp.terminate(nil)
 	}
 
 	@objc private func runningAppsChanged(_ notification: Notification) {
 		appIndex.refreshRunningApps()
+	}
+}
+
+// MARK: - Manage Apps Panel
+
+class ManageAppsPanel: NSPanel, NSTableViewDataSource, NSTableViewDelegate {
+	private let appIndex: AppIndex
+	private let tabView: NSTabView
+	private var recentsTable: NSTableView!
+	private var hiddenTable: NSTableView!
+	private var recents: [(name: String, path: String, count: Int)] = []
+	private var hidden: [(name: String, path: String)] = []
+
+	init(appIndex: AppIndex) {
+		self.appIndex = appIndex
+		tabView = NSTabView()
+
+		super.init(
+			contentRect: NSRect(x: 0, y: 0, width: 520, height: 380),
+			styleMask: [.titled, .closable],
+			backing: .buffered,
+			defer: false
+		)
+
+		title = "Manage Apps"
+		setupUI()
+		reload()
+		center()
+	}
+
+	private func setupUI() {
+		tabView.frame = NSRect(x: 10, y: 10, width: 500, height: 360)
+		tabView.autoresizingMask = [.width, .height]
+		contentView?.addSubview(tabView)
+
+		// Recents tab
+		let recentsTab = NSTabViewItem(identifier: "recents")
+		recentsTab.label = "Recent Apps"
+		let recentsView = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+
+		recentsTable = makeTable()
+		recentsTable.dataSource = self
+		recentsTable.delegate = self
+		let recentsScroll = makeScrollView(for: recentsTable,
+			frame: NSRect(x: 0, y: 40, width: 480, height: 280))
+		recentsView.addSubview(recentsScroll)
+
+		let clearBtn = NSButton(title: "Remove Selected", target: self, action: #selector(clearSelectedRecent))
+		clearBtn.frame = NSRect(x: 0, y: 4, width: 140, height: 28)
+		recentsView.addSubview(clearBtn)
+
+		recentsTab.view = recentsView
+		tabView.addTabViewItem(recentsTab)
+
+		// Hidden tab
+		let hiddenTab = NSTabViewItem(identifier: "hidden")
+		hiddenTab.label = "Hidden Apps"
+		let hiddenView = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+
+		hiddenTable = makeTable()
+		hiddenTable.dataSource = self
+		hiddenTable.delegate = self
+		let hiddenScroll = makeScrollView(for: hiddenTable,
+			frame: NSRect(x: 0, y: 40, width: 480, height: 280))
+		hiddenView.addSubview(hiddenScroll)
+
+		let restoreBtn = NSButton(title: "Restore Selected", target: self, action: #selector(restoreSelectedHidden))
+		restoreBtn.frame = NSRect(x: 0, y: 4, width: 140, height: 28)
+		hiddenView.addSubview(restoreBtn)
+
+		hiddenTab.view = hiddenView
+		tabView.addTabViewItem(hiddenTab)
+	}
+
+	private func makeTable() -> NSTableView {
+		let table = NSTableView()
+		let nameCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+		nameCol.title = "Name"
+		nameCol.width = 200
+		table.addTableColumn(nameCol)
+		let detailCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("detail"))
+		detailCol.title = "Detail"
+		detailCol.width = 250
+		table.addTableColumn(detailCol)
+		table.rowHeight = 22
+		table.allowsMultipleSelection = true
+		return table
+	}
+
+	private func makeScrollView(for table: NSTableView, frame: NSRect) -> NSScrollView {
+		let scroll = NSScrollView(frame: frame)
+		scroll.documentView = table
+		scroll.hasVerticalScroller = true
+		scroll.autoresizingMask = [.width, .height]
+		return scroll
+	}
+
+	private func reload() {
+		recents = appIndex.getRecentApps()
+		hidden = appIndex.getHiddenApps()
+		recentsTable.reloadData()
+		hiddenTable.reloadData()
+	}
+
+	@objc private func clearSelectedRecent() {
+		let rows = recentsTable.selectedRowIndexes
+		for row in rows.reversed() {
+			guard row < recents.count else { continue }
+			appIndex.clearUsage(forPath: recents[row].path)
+		}
+		reload()
+	}
+
+	@objc private func restoreSelectedHidden() {
+		let rows = hiddenTable.selectedRowIndexes
+		for row in rows.reversed() {
+			guard row < hidden.count else { continue }
+			appIndex.unhideApp(path: hidden[row].path)
+		}
+		reload()
+	}
+
+	// MARK: NSTableViewDataSource
+
+	func numberOfRows(in tableView: NSTableView) -> Int {
+		if tableView === recentsTable { return recents.count }
+		return hidden.count
+	}
+
+	// MARK: NSTableViewDelegate
+
+	func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+		let colID = tableColumn?.identifier.rawValue ?? ""
+		let label: NSTextField
+
+		if tableView === recentsTable {
+			let r = recents[row]
+			if colID == "name" {
+				label = NSTextField(labelWithString: r.name)
+			} else {
+				label = NSTextField(labelWithString: "\(r.count) launches")
+			}
+		} else {
+			let h = hidden[row]
+			if colID == "name" {
+				label = NSTextField(labelWithString: h.name)
+			} else {
+				label = NSTextField(labelWithString: h.path)
+			}
+		}
+
+		label.font = .systemFont(ofSize: 13)
+		label.lineBreakMode = .byTruncatingTail
+		return label
 	}
 }
 
