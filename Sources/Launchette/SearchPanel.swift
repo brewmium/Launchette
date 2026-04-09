@@ -179,6 +179,18 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 
 	override var canBecomeKey: Bool { true }
 
+	override func performKeyEquivalent(with event: NSEvent) -> Bool {
+		if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "c" {
+			let row = resultsTable.selectedRow
+			if row >= 0, row < results.count, results[row].hidePath == nil {
+				// Math result -- copy it
+				results[row].action()
+				return true
+			}
+		}
+		return super.performKeyEquivalent(with: event)
+	}
+
 	// MARK: View setup
 
 	private func setupViews() {
@@ -322,7 +334,7 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 				results.append(SearchResult(
 					icon: NSImage(systemSymbolName: "equal.circle.fill", accessibilityDescription: "Math")
 						?? NSImage(),
-					title: "= \(resultStr)",
+					title: resultStr,
 					version: "",
 					displayPath: "",
 					status: "Copy to clipboard",
@@ -462,48 +474,70 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 		let titleH = ceil(titleFS * 1.4)
 		let subH = ceil(subFS * 1.4)
 		let gap: CGFloat = 1
-		let hasBottom = !result.displayPath.isEmpty || !result.status.isEmpty
-		let groupH = hasBottom ? titleH + gap + subH : titleH
-		let groupBot = (rh - groupH) / 2
-		let topY = groupBot + (hasBottom ? subH + gap : 0)
-		let botY = groupBot
+		let hasTwoLines = !result.displayPath.isEmpty || !result.version.isEmpty
 
-		// Top line left: title
-		let titleLabel = NSTextField(labelWithString: result.title)
-		titleLabel.frame = NSRect(x: textX, y: topY, width: rightEdge - textX, height: titleH)
-		titleLabel.font = .systemFont(ofSize: titleFS, weight: .medium)
-		titleLabel.textColor = .labelColor
-		titleLabel.lineBreakMode = .byTruncatingTail
-		cell.addSubview(titleLabel)
+		if hasTwoLines {
+			let groupH = titleH + gap + subH
+			let groupBot = (rh - groupH) / 2
+			let topY = groupBot + subH + gap
+			let botY = groupBot
 
-		// Top line right: version
-		if !result.version.isEmpty {
-			let verLabel = NSTextField(labelWithString: result.version)
-			verLabel.font = .monospacedDigitSystemFont(ofSize: subFS, weight: .regular)
-			verLabel.textColor = .secondaryLabelColor
-			verLabel.sizeToFit()
-			verLabel.frame.origin = NSPoint(x: rightEdge - verLabel.frame.width, y: topY + 2)
-			cell.addSubview(verLabel)
-		}
+			// Top line left: title
+			let titleLabel = NSTextField(labelWithString: result.title)
+			titleLabel.frame = NSRect(x: textX, y: topY, width: rightEdge - textX, height: titleH)
+			titleLabel.font = .systemFont(ofSize: titleFS, weight: .medium)
+			titleLabel.textColor = .labelColor
+			titleLabel.lineBreakMode = .byTruncatingTail
+			cell.addSubview(titleLabel)
 
-		// Bottom line left: path
-		if !result.displayPath.isEmpty {
-			let pathLabel = NSTextField(labelWithString: result.displayPath)
-			pathLabel.font = .systemFont(ofSize: subFS)
-			pathLabel.textColor = .secondaryLabelColor
-			pathLabel.lineBreakMode = .byTruncatingMiddle
-			pathLabel.frame = NSRect(x: textX, y: botY, width: rightEdge - textX - 80, height: subH)
-			cell.addSubview(pathLabel)
-		}
+			// Top line right: version
+			if !result.version.isEmpty {
+				let verLabel = NSTextField(labelWithString: result.version)
+				verLabel.font = .monospacedDigitSystemFont(ofSize: subFS, weight: .regular)
+				verLabel.textColor = .secondaryLabelColor
+				verLabel.sizeToFit()
+				verLabel.frame.origin = NSPoint(x: rightEdge - verLabel.frame.width, y: topY + 2)
+				cell.addSubview(verLabel)
+			}
 
-		// Bottom line right: status
-		if !result.status.isEmpty {
-			let statusLabel = NSTextField(labelWithString: result.status)
-			statusLabel.font = .systemFont(ofSize: subFS)
-			statusLabel.textColor = .secondaryLabelColor
-			statusLabel.sizeToFit()
-			statusLabel.frame.origin = NSPoint(x: rightEdge - statusLabel.frame.width, y: botY)
-			cell.addSubview(statusLabel)
+			// Bottom line left: path
+			if !result.displayPath.isEmpty {
+				let pathLabel = NSTextField(labelWithString: result.displayPath)
+				pathLabel.font = .systemFont(ofSize: subFS)
+				pathLabel.textColor = .secondaryLabelColor
+				pathLabel.lineBreakMode = .byTruncatingMiddle
+				pathLabel.frame = NSRect(x: textX, y: botY, width: rightEdge - textX - 80, height: subH)
+				cell.addSubview(pathLabel)
+			}
+
+			// Bottom line right: status
+			if !result.status.isEmpty {
+				let statusLabel = NSTextField(labelWithString: result.status)
+				statusLabel.font = .systemFont(ofSize: subFS)
+				statusLabel.textColor = .secondaryLabelColor
+				statusLabel.sizeToFit()
+				statusLabel.frame.origin = NSPoint(x: rightEdge - statusLabel.frame.width, y: botY)
+				cell.addSubview(statusLabel)
+			}
+		} else {
+			// Single line -- title centered, status on same line right-aligned
+			let titleY = (rh - titleH) / 2
+
+			let titleLabel = NSTextField(labelWithString: result.title)
+			titleLabel.frame = NSRect(x: textX, y: titleY, width: rightEdge - textX, height: titleH)
+			titleLabel.font = .systemFont(ofSize: titleFS, weight: .medium)
+			titleLabel.textColor = .labelColor
+			titleLabel.lineBreakMode = .byTruncatingTail
+			cell.addSubview(titleLabel)
+
+			if !result.status.isEmpty {
+				let statusLabel = NSTextField(labelWithString: result.status)
+				statusLabel.font = .systemFont(ofSize: subFS)
+				statusLabel.textColor = .secondaryLabelColor
+				statusLabel.sizeToFit()
+				statusLabel.frame.origin = NSPoint(x: rightEdge - statusLabel.frame.width, y: titleY + 2)
+				cell.addSubview(statusLabel)
+			}
 		}
 
 		return cell
