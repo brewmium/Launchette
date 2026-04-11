@@ -63,6 +63,7 @@ class AppIndex {
 			"/Applications/Utilities",
 			"/System/Applications",
 			"/System/Applications/Utilities",
+			"/System/Library/CoreServices",
 			NSHomeDirectory() + "/Applications",
 		]
 
@@ -110,6 +111,9 @@ class AppIndex {
 		let displayName = bundle?.infoDictionary?["CFBundleDisplayName"] as? String
 			?? bundle?.infoDictionary?["CFBundleName"] as? String
 			?? fallbackName
+		// Skip background-only apps (not user-launchable)
+		if bundle?.infoDictionary?["LSBackgroundOnly"] as? Bool == true { return nil }
+
 		let bundleID = bundle?.bundleIdentifier
 		let version = bundle?.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
 		let icon = NSWorkspace.shared.icon(forFile: path)
