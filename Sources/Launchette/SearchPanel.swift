@@ -310,10 +310,12 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 		)
 	}
 
-	func dismiss() {
+	func dismiss(restoreFocus: Bool = true) {
 		NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)
 		orderOut(nil)
-		previousApp?.activate(options: [])
+		if restoreFocus {
+			previousApp?.activate(options: [])
+		}
 		previousApp = nil
 	}
 
@@ -395,7 +397,8 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 		let row = resultsTable.selectedRow
 		guard row >= 0, row < results.count else { return }
 		let action = results[row].action
-		dismiss()
+		dismiss(restoreFocus: false)
+		NSApp.hide(nil)
 		action()
 	}
 
@@ -403,7 +406,8 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 		let row = resultsTable.clickedRow
 		guard row >= 0, row < results.count else { return }
 		let action = results[row].action
-		dismiss()
+		dismiss(restoreFocus: false)
+		NSApp.hide(nil)
 		action()
 	}
 

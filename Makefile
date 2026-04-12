@@ -10,6 +10,7 @@ build:
 	mkdir -p "$(APP_BUNDLE)/Contents/Resources"
 	cp "$(BUILD_DIR)/$(APP_NAME)" "$(APP_BUNDLE)/Contents/MacOS/"
 	cp "Resources/Info.plist" "$(APP_BUNDLE)/Contents/"
+	codesign --force --sign - "$(APP_BUNDLE)"
 
 run: build
 	open "$(APP_BUNDLE)"

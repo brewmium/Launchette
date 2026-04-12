@@ -4,6 +4,7 @@ import Cocoa
 
 struct AppEntry {
 	let name: String
+	let bundleName: String
 	let path: String
 	let bundleIdentifier: String?
 	let version: String
@@ -23,10 +24,7 @@ struct AppEntry {
 	}
 
 	func launch() {
-		let url = URL(fileURLWithPath: path)
-		let config = NSWorkspace.OpenConfiguration()
-		config.activates = true
-		NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
+		NSWorkspace.shared.open(URL(fileURLWithPath: path))
 	}
 }
 
@@ -106,14 +104,14 @@ class AppIndex {
 
 	private func makeEntry(path: String, isCustom: Bool) -> AppEntry? {
 		let url = URL(fileURLWithPath: path)
-		let fallbackName = url.deletingPathExtension().lastPathComponent
+		let displayName = url.deletingPathExtension().lastPathComponent
 		let bundle = Bundle(path: path)
-		let displayName = bundle?.infoDictionary?["CFBundleDisplayName"] as? String
-			?? bundle?.infoDictionary?["CFBundleName"] as? String
-			?? fallbackName
 		// Skip background-only apps (not user-launchable)
 		if bundle?.infoDictionary?["LSBackgroundOnly"] as? Bool == true { return nil }
 
+		let bundleName = bundle?.infoDictionary?["CFBundleDisplayName"] as? String
+			?? bundle?.infoDictionary?["CFBundleName"] as? String
+			?? displayName
 		let bundleID = bundle?.bundleIdentifier
 		let version = bundle?.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
 		let icon = NSWorkspace.shared.icon(forFile: path)
@@ -121,6 +119,7 @@ class AppIndex {
 
 		return AppEntry(
 			name: displayName,
+			bundleName: bundleName,
 			path: path,
 			bundleIdentifier: bundleID,
 			version: version,
@@ -133,11 +132,11 @@ class AppIndex {
 	// MARK: Running apps
 
 	func refreshRunningApps() {
-		let runningIDs = Set(
-			NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier }
+		let runningPaths = Set(
+			NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path }
 		)
 		for i in apps.indices {
-			apps[i].isRunning = apps[i].bundleIdentifier.map { runningIDs.contains($0) } ?? false
+			apps[i].isRunning = runningPaths.contains(apps[i].path)
 		}
 	}
 
@@ -151,15 +150,18 @@ class AppIndex {
 			guard !hiddenPaths.contains(app.path) else { continue }
 
 			let name = app.name.lowercased()
+			let alias = app.bundleName.lowercased()
 			var score = 0
 
-			if name == q {
+			if name == q || alias == q {
 				score = 100
-			} else if name.hasPrefix(q) {
+			} else if name.hasPrefix(q) || alias.hasPrefix(q) {
 				score = 80
-			} else if name.contains(q) {
+			} else if name.contains(q) || alias.contains(q) {
 				score = 60
-			} else if fuzzyMatch(query: q, target: name) {
+			} else if initialsMatch(query: q, name: name) || initialsMatch(query: q, name: alias) {
+				score = 70
+			} else if fuzzyMatch(query: q, target: name) || fuzzyMatch(query: q, target: alias) {
 				score = 40
 			} else {
 				continue
@@ -178,6 +180,27 @@ class AppIndex {
 			}
 			.prefix(8)
 			.map { $0.entry }
+	}
+
+	private func initialsMatch(query: String, name: String) -> Bool {
+		// Split on spaces, hyphens, camelCase boundaries
+		var initials: [Character] = []
+		let words = name.split { $0 == " " || $0 == "-" || $0 == "_" }
+		for word in words {
+			if let first = word.first {
+				initials.append(first)
+			}
+			// Also grab camelCase boundaries within a word
+			var prev: Character? = word.first
+			for ch in word.dropFirst() {
+				if ch.isUppercase && prev?.isUppercase == false {
+					initials.append(ch)
+				}
+				prev = ch
+			}
+		}
+		let initialsStr = String(initials).lowercased()
+		return initialsStr.hasPrefix(query)
 	}
 
 	private func fuzzyMatch(query: String, target: String) -> Bool {
