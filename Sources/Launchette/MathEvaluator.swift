@@ -63,9 +63,16 @@ class MathEvaluator {
 		let n = result.toDouble()
 		guard n.isFinite else { return nil }
 
+		let formatter = NumberFormatter()
+		formatter.groupingSeparator = ","
+		formatter.usesGroupingSeparator = true
+
 		if n == Darwin.floor(n) && Swift.abs(n) < 1e15 {
-			return String(format: "%.0f", n)
+			formatter.maximumFractionDigits = 0
+			return formatter.string(from: NSNumber(value: n)) ?? String(format: "%.0f", n)
 		}
-		return String(format: "%g", n)
+		formatter.maximumFractionDigits = 10
+		formatter.minimumFractionDigits = 0
+		return formatter.string(from: NSNumber(value: n)) ?? String(format: "%g", n)
 	}
 }
