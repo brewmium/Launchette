@@ -2,7 +2,7 @@
 
 You just want a Cmd+Space app launcher like you used to have before macOS 26.4, and you want one that sucks less. Launchette is the answer.
 
-No AI. No suggestions. No "enhanced search." No Siri. Type a name, launch the app. Do math, get the answer. That's it.
+No AI. No suggestions. No "enhanced search." No Siri. Type a name, launch the app. Do math, get the answer (FAST). That's it.
 
 ## Features
 
