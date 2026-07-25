@@ -2,6 +2,7 @@ import Cocoa
 import Carbon.HIToolbox
 import ServiceManagement
 import UniformTypeIdentifiers
+import UserNotifications
 
 // MARK: - Carbon hotkey callback (free function for C interop)
 
@@ -16,18 +17,21 @@ private func hotKeyCallback(
 
 // MARK: - AppDelegate
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
 	static weak var instance: AppDelegate?
 
 	private var statusItem: NSStatusItem!
 	private var searchPanel: SearchPanel!
 	private let appIndex = AppIndex()
+	private let timerStore = TimerStore()
 	private var hotKeyRef: EventHotKeyRef?
 	private var eventHandlerRef: EventHandlerRef?
-	private var hotKeyMenuItem: NSMenuItem!
-	private var loginItem: NSMenuItem!
-	private var sizeMenuItems: [NSMenuItem] = []
-	private var screenMenuItems: [NSMenuItem] = []
+	private var runningMenuItems: [UUID: NSMenuItem] = [:]
+	private var ringingSounds: [UUID: NSSound] = [:]
+	private var chips: [UUID: AlertChip] = [:]
+	private var notificationsAuthorized = false
+
+	private static let defaultAlertSound = "Glass"
 
 	// MARK: Lifecycle
 
@@ -37,8 +41,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 		installEventHandler()
 		registerHotKey()
 		searchPanel = SearchPanel(appIndex: appIndex)
-		updateSizeCheckmarks()
-		updateScreenCheckmarks()
+		searchPanel.onStartTimer = { [weak self] input, label in
+			self?.timerStore.start(input, label: label)
+		}
+		timerStore.onChange = { [weak self] in
+			self?.renderStatusItem()
+		}
+		timerStore.onFire = { [weak self] timer in
+			self?.timerFired(timer)
+		}
+		timerStore.onRingEnd = { [weak self] timer in
+			self?.ringEnded(timer)
+		}
+		setupNotifications()
+		renderStatusItem()
 		appIndex.scan()
 
 		let nc = NSWorkspace.shared.notificationCenter
@@ -48,10 +64,108 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 			name: NSWorkspace.didTerminateApplicationNotification, object: nil)
 	}
 
+	// MARK: Alerts on fire
+
+	private var selectedAlertSound: String {
+		UserDefaults.standard.string(forKey: "alertSound") ?? Self.defaultAlertSound
+	}
+
+	private func timerFired(_ timer: CountdownTimer) {
+		// 10s chime loop (TimerStore ends the ring; any Stop cuts it early)
+		if let sound = NSSound(named: selectedAlertSound) {
+			sound.loops = true
+			sound.play()
+			ringingSounds[timer.id] = sound
+		}
+
+		postNotification(for: timer)
+
+		// The chip is the primary visual -- always shown, not just a fallback
+		showChip(for: timer)
+	}
+
+	private func ringEnded(_ timer: CountdownTimer) {
+		ringingSounds[timer.id]?.stop()
+		ringingSounds[timer.id] = nil
+		chips[timer.id]?.close()
+		chips[timer.id] = nil
+		UNUserNotificationCenter.current()
+			.removeDeliveredNotifications(withIdentifiers: [timer.id.uuidString])
+	}
+
+	private func showChip(for timer: CountdownTimer) {
+		let chip = AlertChip(timer: timer, index: chips.count)
+		chip.onStop = { [weak self] id in
+			self?.timerStore.stopRinging(id: id)
+		}
+		chips[timer.id] = chip
+		chip.show()
+	}
+
+	// MARK: Notifications
+
+	private func setupNotifications() {
+		let center = UNUserNotificationCenter.current()
+		center.delegate = self
+		let stop = UNNotificationAction(identifier: "STOP", title: "Stop", options: [])
+		let category = UNNotificationCategory(
+			identifier: "TIMER_DONE", actions: [stop], intentIdentifiers: [], options: [])
+		center.setNotificationCategories([category])
+		center.requestAuthorization(options: [.alert]) { [weak self] granted, _ in
+			DispatchQueue.main.async { self?.notificationsAuthorized = granted }
+		}
+	}
+
+	private func postNotification(for timer: CountdownTimer) {
+		guard notificationsAuthorized else { return }
+		let content = UNMutableNotificationContent()
+		content.title = timer.displayName
+		content.body = "Time's up"
+		content.categoryIdentifier = "TIMER_DONE"
+		let request = UNNotificationRequest(
+			identifier: timer.id.uuidString, content: content, trigger: nil)
+		UNUserNotificationCenter.current().add(request)
+	}
+
+	// Show banners while the app is "frontmost" (accessory apps usually are not,
+	// but a ringing timer must surface either way)
+	func userNotificationCenter(_ center: UNUserNotificationCenter,
+		willPresent notification: UNNotification,
+		withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void)
+	{
+		completionHandler([.banner])
+	}
+
+	// Stop action -- or any click on the notification -- stops the ringing
+	func userNotificationCenter(_ center: UNUserNotificationCenter,
+		didReceive response: UNNotificationResponse,
+		withCompletionHandler completionHandler: @escaping () -> Void)
+	{
+		if let id = UUID(uuidString: response.notification.request.identifier) {
+			DispatchQueue.main.async { [weak self] in
+				self?.timerStore.stopRinging(id: id)
+			}
+		}
+		completionHandler()
+	}
+
+	// MARK: Status item rendering
+
+	private func renderStatusItem() {
+		MenuBarView.render(statusItem: statusItem, store: timerStore)
+
+		// Live-update running rows while the menu is open
+		for (id, item) in runningMenuItems {
+			if let timer = timerStore.timer(id: id) {
+				item.title = runningTitle(timer)
+			}
+		}
+	}
+
 	// MARK: Menu bar
 
 	private func setupMenuBar() {
-		statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+		statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 		if let button = statusItem.button {
 			let icon = SearchPanel.makeLaunchetteIcon(size: 18, tint: NSColor.white.withAlphaComponent(0.7))
 			icon.isTemplate = false
@@ -59,12 +173,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 		}
 
 		let menu = NSMenu()
+		menu.delegate = self
+		statusItem.menu = menu
+	}
+
+	// MARK: Menu building (rebuilt on every open)
+
+	func menuNeedsUpdate(_ menu: NSMenu) {
+		menu.removeAllItems()
+		runningMenuItems = [:]
+
+		// Running timers section, only while timers exist
+		if timerStore.count > 0 {
+			for timer in timerStore.timers {
+				let item = NSMenuItem(title: runningTitle(timer), action: nil, keyEquivalent: "")
+				item.submenu = timerSubmenu(timer)
+				menu.addItem(item)
+				runningMenuItems[timer.id] = item
+			}
+			menu.addItem(.separator())
+		}
 
 		let pref = loadHotKeyPreference()
 		let keyStr = hotkeyDisplayString(keyCode: pref.keyCode, modifiers: pref.modifiers)
-		hotKeyMenuItem = NSMenuItem(title: "Change Hotkey (\(keyStr))...", action: #selector(changeHotKey), keyEquivalent: "")
-		hotKeyMenuItem.target = self
-		menu.addItem(hotKeyMenuItem)
+		let hotKeyItem = NSMenuItem(title: "Change Hotkey (\(keyStr))...", action: #selector(changeHotKey), keyEquivalent: "")
+		hotKeyItem.target = self
+		menu.addItem(hotKeyItem)
 
 		let addItem = NSMenuItem(title: "Add Custom App...", action: #selector(addCustomApp), keyEquivalent: "")
 		addItem.target = self
@@ -81,8 +215,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 			let item = NSMenuItem(title: size.label, action: #selector(changeSize(_:)), keyEquivalent: "")
 			item.target = self
 			item.tag = size.rawValue
+			item.state = size == searchPanel.currentSize ? .on : .off
 			sizeMenu.addItem(item)
-			sizeMenuItems.append(item)
 		}
 		let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
 		sizeItem.submenu = sizeMenu
@@ -93,8 +227,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 			let item = NSMenuItem(title: mode.label, action: #selector(changeScreenMode(_:)), keyEquivalent: "")
 			item.target = self
 			item.tag = mode.rawValue
+			item.state = mode == searchPanel.screenMode ? .on : .off
 			screenMenu.addItem(item)
-			screenMenuItems.append(item)
 		}
 		let screenItem = NSMenuItem(title: "Open On", action: nil, keyEquivalent: "")
 		screenItem.submenu = screenMenu
@@ -106,7 +240,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 		menu.addItem(NSMenuItem.separator())
 
-		loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+		let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
 		loginItem.target = self
 		loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
 		menu.addItem(loginItem)
@@ -116,8 +250,90 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 		let quitItem = NSMenuItem(title: "Quit Launchette", action: #selector(quit), keyEquivalent: "")
 		quitItem.target = self
 		menu.addItem(quitItem)
+	}
 
-		statusItem.menu = menu
+	// Remaining first -- that is what you look for -- then the origin in
+	// parens: original duration, target clock time, and the label if any
+	private func runningTitle(_ timer: CountdownTimer) -> String {
+		let original: String
+		switch timer.kind {
+		case .durationTimer: original = TimeFormat.compact(timer.total)
+		case .clockAlarm: original = timer.targetString
+		}
+		let origin: String
+		if let label = timer.label, !label.isEmpty {
+			origin = "\"\(label)\" \(original)"
+		} else {
+			origin = original
+		}
+		switch timer.state {
+		case .ringing: return "Time's up -- \(timer.displayName)"
+		case .paused: return "\(TimeFormat.compact(timer.remaining))   (\(origin)) -- paused"
+		case .running: return "\(TimeFormat.compact(timer.remaining))   (\(origin))"
+		}
+	}
+
+	private func timerSubmenu(_ timer: CountdownTimer) -> NSMenu {
+		let sub = NSMenu()
+
+		func add(_ title: String, _ action: Selector) {
+			let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+			item.target = self
+			item.representedObject = timer.id
+			sub.addItem(item)
+		}
+
+		switch timer.state {
+		case .ringing:
+			add("Stop", #selector(stopTimerRinging(_:)))
+		case .paused:
+			add("Resume", #selector(resumeTimer(_:)))
+			add("+1m", #selector(addMinuteToTimer(_:)))
+			if timer.kind == .durationTimer {
+				add("Start Over", #selector(restartTimer(_:)))
+			}
+			add("Cancel", #selector(cancelTimer(_:)))
+		case .running:
+			add("Pause", #selector(pauseTimer(_:)))
+			add("+1m", #selector(addMinuteToTimer(_:)))
+			if timer.kind == .durationTimer {
+				add("Start Over", #selector(restartTimer(_:)))
+			}
+			add("Cancel", #selector(cancelTimer(_:)))
+		}
+		return sub
+	}
+
+	// MARK: Timer menu actions
+
+	@objc private func pauseTimer(_ sender: NSMenuItem) {
+		guard let id = sender.representedObject as? UUID else { return }
+		timerStore.pause(id: id)
+	}
+
+	@objc private func resumeTimer(_ sender: NSMenuItem) {
+		guard let id = sender.representedObject as? UUID else { return }
+		timerStore.resume(id: id)
+	}
+
+	@objc private func addMinuteToTimer(_ sender: NSMenuItem) {
+		guard let id = sender.representedObject as? UUID else { return }
+		timerStore.addMinute(id: id)
+	}
+
+	@objc private func restartTimer(_ sender: NSMenuItem) {
+		guard let id = sender.representedObject as? UUID else { return }
+		timerStore.restart(id: id)
+	}
+
+	@objc private func cancelTimer(_ sender: NSMenuItem) {
+		guard let id = sender.representedObject as? UUID else { return }
+		timerStore.cancel(id: id)
+	}
+
+	@objc private func stopTimerRinging(_ sender: NSMenuItem) {
+		guard let id = sender.representedObject as? UUID else { return }
+		timerStore.stopRinging(id: id)
 	}
 
 	// MARK: Global hotkey
@@ -187,9 +403,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 		let hotKeyID = EventHotKeyID(signature: OSType(0x4C434854), id: 1)
 		RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
 		saveHotKeyPreference(keyCode: keyCode, modifiers: modifiers)
-
-		let keyStr = hotkeyDisplayString(keyCode: keyCode, modifiers: modifiers)
-		hotKeyMenuItem.title = "Change Hotkey (\(keyStr))..."
+		// Menu titles pick up the new binding on the next menuNeedsUpdate
 	}
 
 	// MARK: Hotkey display
@@ -274,37 +488,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 	@objc private func changeSize(_ sender: NSMenuItem) {
 		guard let size = PanelSize(rawValue: sender.tag) else { return }
 		searchPanel.setSize(size)
-		updateSizeCheckmarks()
-	}
-
-	private func updateSizeCheckmarks() {
-		let current = searchPanel.currentSize
-		for item in sizeMenuItems {
-			item.state = item.tag == current.rawValue ? .on : .off
-		}
 	}
 
 	@objc private func changeScreenMode(_ sender: NSMenuItem) {
 		guard let mode = ScreenMode(rawValue: sender.tag) else { return }
 		searchPanel.setScreenMode(mode)
-		updateScreenCheckmarks()
-	}
-
-	private func updateScreenCheckmarks() {
-		let current = searchPanel.screenMode
-		for item in screenMenuItems {
-			item.state = item.tag == current.rawValue ? .on : .off
-		}
 	}
 
 	@objc private func toggleLaunchAtLogin() {
 		do {
 			if SMAppService.mainApp.status == .enabled {
 				try SMAppService.mainApp.unregister()
-				loginItem.state = .off
 			} else {
 				try SMAppService.mainApp.register()
-				loginItem.state = .on
 			}
 		} catch {
 			NSLog("Launchette: Failed to toggle login item: \(error)")

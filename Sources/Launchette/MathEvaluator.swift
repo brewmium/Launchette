@@ -27,20 +27,13 @@ class MathEvaluator {
 			""")
 	}
 
+	// Math requires explicit intent: input must start with "=". The prefix is
+	// the whole gate -- anything evaluable after it is fair game (=2+2, =pi).
 	func evaluate(_ input: String) -> String? {
-		let s = input.trimmingCharacters(in: .whitespaces)
+		var s = input.trimmingCharacters(in: .whitespaces)
+		guard s.hasPrefix("=") else { return nil }
+		s = String(s.dropFirst()).trimmingCharacters(in: .whitespaces)
 		guard !s.isEmpty else { return nil }
-
-		// Must contain at least one digit
-		guard s.rangeOfCharacter(from: .decimalDigits) != nil else { return nil }
-
-		// Must have an operator, parens, 'x' as multiply, or known function
-		let ops = CharacterSet(charactersIn: "+-*/%^()")
-		let hasXMultiply = s.range(of: "(?<=[0-9)])\\s*x\\s*(?=[0-9(])", options: .regularExpression) != nil
-		let hasOp = s.rangeOfCharacter(from: ops) != nil || hasXMultiply
-		let funcs = ["sqrt", "cbrt", "abs", "sin", "cos", "tan", "log", "pow", "round", "floor", "ceil", "min", "max"]
-		let hasFunc = funcs.contains(where: { s.lowercased().contains($0) })
-		guard hasOp || hasFunc else { return nil }
 
 		// Only safe characters
 		let allowed = CharacterSet.decimalDigits

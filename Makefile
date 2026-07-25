@@ -1,4 +1,4 @@
-.PHONY: build run clean install uninstall
+.PHONY: build run clean install uninstall test
 
 APP_NAME = Launchette
 BUILD_DIR = .build/release
@@ -14,6 +14,9 @@ build:
 
 run: build
 	open "$(APP_BUNDLE)"
+
+test:
+	swift test
 
 clean:
 	swift package clean

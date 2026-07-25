@@ -24,7 +24,12 @@ enum PanelSize: Int, CaseIterable {
 
 // MARK: - Search result model
 
+enum ResultKind {
+	case math, timer, app
+}
+
 struct SearchResult {
+	let kind: ResultKind
 	let icon: NSImage
 	let title: String
 	let version: String
@@ -96,6 +101,8 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 	private let mathEvaluator = MathEvaluator()
 	private var results: [SearchResult] = []
 	private var previousApp: NSRunningApplication?
+
+	var onStartTimer: ((TimerInput, String?) -> Void)?
 
 	private let panelWidth: CGFloat = 561
 	private let strokeColor = NSColor(red: 0xFA/255.0, green: 0xF4/255.0, blue: 0x9A/255.0, alpha: 1.0)
@@ -182,7 +189,7 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 	override func performKeyEquivalent(with event: NSEvent) -> Bool {
 		if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "c" {
 			let row = resultsTable.selectedRow
-			if row >= 0, row < results.count, results[row].hidePath == nil {
+			if row >= 0, row < results.count, results[row].kind == .math {
 				// Math result -- copy it
 				results[row].action()
 				return true
@@ -233,7 +240,7 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 		searchField.cell = centeredCell
 		searchField.font = .systemFont(ofSize: 24, weight: .light)
 		searchField.placeholderAttributedString = NSAttributedString(
-			string: "Search or calculate...",
+			string: "Search, timer, or =math...",
 			attributes: [
 				.foregroundColor: NSColor.secondaryLabelColor,
 				.font: NSFont.systemFont(ofSize: 24, weight: .light),
@@ -330,10 +337,11 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 		results = []
 
 		if !query.isEmpty {
-			// Math
+			// Math (input starting with "=")
 			if let mathResult = mathEvaluator.evaluate(query) {
 				let resultStr = mathResult
 				results.append(SearchResult(
+					kind: .math,
 					icon: NSImage(systemSymbolName: "equal.circle.fill", accessibilityDescription: "Math")
 						?? NSImage(),
 					title: resultStr,
@@ -348,11 +356,29 @@ class SearchPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource, NSTableV
 				))
 			}
 
+			// Timer (duration, clock time, optional trailing label)
+			if let parsed = InputParser.parseWithLabel(query) {
+				let input = parsed.input
+				let label = parsed.label
+				results.append(SearchResult(
+					kind: .timer,
+					icon: NSImage(systemSymbolName: "timer.circle.fill", accessibilityDescription: "Timer")
+						?? NSImage(),
+					title: input.previewTitle(label: label),
+					version: "",
+					displayPath: "",
+					status: "",
+					hidePath: nil,
+					action: { [weak self] in self?.onStartTimer?(input, label) }
+				))
+			}
+
 			// Apps
 			for app in appIndex.search(query: query) {
 				let entry = app
 				let idx = appIndex
 				results.append(SearchResult(
+					kind: .app,
 					icon: entry.icon,
 					title: entry.name,
 					version: entry.version,
