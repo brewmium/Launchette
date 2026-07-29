@@ -56,6 +56,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
 		setupNotifications()
 		renderStatusItem()
 		appIndex.scan()
+		appIndex.startWatching()
 
 		let nc = NSWorkspace.shared.notificationCenter
 		nc.addObserver(self, selector: #selector(runningAppsChanged),

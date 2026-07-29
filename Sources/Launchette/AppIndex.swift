@@ -31,10 +31,22 @@ struct AppEntry {
 // MARK: - App index
 
 class AppIndex {
+	private static let searchDirs = [
+		"/Applications",
+		"/Applications/Utilities",
+		"/System/Applications",
+		"/System/Applications/Utilities",
+		"/System/Library/CoreServices",
+		NSHomeDirectory() + "/Applications",
+	]
+
 	private var apps: [AppEntry] = []
 	private var customAppPaths: Set<String> = []
 	private var usageCounts: [String: Int] = [:]
 	private var hiddenPaths: Set<String> = []
+	private var watchers: [DispatchSourceFileSystemObject] = []
+	private var pendingRescan: DispatchWorkItem?
+	private var dailyRescanTimer: Timer?
 	private let customAppsURL: URL
 	private let usageURL: URL
 	private let hiddenURL: URL
@@ -56,16 +68,7 @@ class AppIndex {
 	func scan() {
 		var discovered: [String: AppEntry] = [:]
 
-		let searchDirs = [
-			"/Applications",
-			"/Applications/Utilities",
-			"/System/Applications",
-			"/System/Applications/Utilities",
-			"/System/Library/CoreServices",
-			NSHomeDirectory() + "/Applications",
-		]
-
-		for dir in searchDirs {
+		for dir in Self.searchDirs {
 			scanDirectory(dir, into: &discovered, depth: 2)
 		}
 
@@ -81,6 +84,37 @@ class AppIndex {
 			$0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
 		}
 		refreshRunningApps()
+	}
+
+	// MARK: Watching
+
+	// Belt and suspenders: directory watchers catch installs/removals within
+	// seconds of them happening; a daily full rescan catches anything they
+	// can't see (changes inside unwatched subfolders, a folder that didn't
+	// exist at startup, a missed event).
+	func startWatching() {
+		for dir in Self.searchDirs {
+			let fd = open(dir, O_EVTONLY)
+			guard fd >= 0 else { continue }
+			let watcher = DispatchSource.makeFileSystemObjectSource(
+				fileDescriptor: fd, eventMask: [.write, .link], queue: .main)
+			watcher.setEventHandler { [weak self] in self?.scheduleRescan() }
+			watcher.setCancelHandler { close(fd) }
+			watcher.resume()
+			watchers.append(watcher)
+		}
+		dailyRescanTimer = Timer.scheduledTimer(withTimeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+			self?.scan()
+		}
+	}
+
+	// An install writes the watched directory several times in a burst;
+	// coalesce to one scan after it settles.
+	private func scheduleRescan() {
+		pendingRescan?.cancel()
+		let work = DispatchWorkItem { [weak self] in self?.scan() }
+		pendingRescan = work
+		DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
 	}
 
 	private func scanDirectory(_ path: String, into discovered: inout [String: AppEntry], depth: Int) {
