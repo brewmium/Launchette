@@ -28,7 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
 	private var eventHandlerRef: EventHandlerRef?
 	private var runningMenuItems: [UUID: NSMenuItem] = [:]
 	private var ringingSounds: [UUID: NSSound] = [:]
-	private var chips: [UUID: AlertChip] = [:]
+	private var chips: [AlertChip] = []
 	private var notificationsAuthorized = false
 
 	private static let defaultAlertSound = "Glass"
@@ -85,22 +85,61 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
 		showChip(for: timer)
 	}
 
+	// Ring over (timed out or stopped): silence the chime, but the chip stays
+	// on screen as the record of what finished -- only a dismiss removes it
 	private func ringEnded(_ timer: CountdownTimer) {
 		ringingSounds[timer.id]?.stop()
 		ringingSounds[timer.id] = nil
-		chips[timer.id]?.close()
-		chips[timer.id] = nil
-		UNUserNotificationCenter.current()
-			.removeDeliveredNotifications(withIdentifiers: [timer.id.uuidString])
+		chip(for: timer.id)?.soundEnded()
 	}
 
 	private func showChip(for timer: CountdownTimer) {
 		let chip = AlertChip(timer: timer, index: chips.count)
-		chip.onStop = { [weak self] id in
-			self?.timerStore.stopRinging(id: id)
+		chip.onDismiss = { [weak self] id, all in
+			if all {
+				self?.dismissAllChips()
+			} else {
+				self?.dismissChip(id: id)
+			}
 		}
-		chips[timer.id] = chip
+		chips.append(chip)
 		chip.show()
+	}
+
+	private func chip(for id: UUID) -> AlertChip? {
+		chips.first { $0.timerID == id }
+	}
+
+	// Dismiss acknowledges the timer everywhere: cut the ring short if it is
+	// still sounding, close the tile, drop the Notification Center copy
+	private func dismissChip(id: UUID) {
+		if timerStore.timer(id: id)?.state == .ringing {
+			timerStore.stopRinging(id: id)
+		}
+		closeChip(id: id)
+	}
+
+	private func dismissAllChips() {
+		for chip in chips {
+			if timerStore.timer(id: chip.timerID)?.state == .ringing {
+				timerStore.stopRinging(id: chip.timerID)
+			}
+			chip.close()
+		}
+		let ids = chips.map { $0.timerID.uuidString }
+		chips.removeAll()
+		UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
+	}
+
+	// Close the tile without touching the store; survivors slide up
+	private func closeChip(id: UUID) {
+		guard let i = chips.firstIndex(where: { $0.timerID == id }) else { return }
+		chips[i].close()
+		chips.remove(at: i)
+		UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id.uuidString])
+		for (index, chip) in chips.enumerated() {
+			chip.reposition(index: index)
+		}
 	}
 
 	// MARK: Notifications
@@ -137,14 +176,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
 		completionHandler([.banner])
 	}
 
-	// Stop action -- or any click on the notification -- stops the ringing
+	// Stop action -- or any click on the notification -- dismisses the timer:
+	// ring cut short if still sounding, chip closed
 	func userNotificationCenter(_ center: UNUserNotificationCenter,
 		didReceive response: UNNotificationResponse,
 		withCompletionHandler completionHandler: @escaping () -> Void)
 	{
 		if let id = UUID(uuidString: response.notification.request.identifier) {
 			DispatchQueue.main.async { [weak self] in
-				self?.timerStore.stopRinging(id: id)
+				self?.dismissChip(id: id)
 			}
 		}
 		completionHandler()
@@ -317,24 +357,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
 		timerStore.resume(id: id)
 	}
 
+	// A menu item built for a running timer can be clicked after the timer
+	// fires (menu held open across the fire) -- if the action revives or kills
+	// the timer, its chip must go too
+
 	@objc private func addMinuteToTimer(_ sender: NSMenuItem) {
 		guard let id = sender.representedObject as? UUID else { return }
+		let wasRinging = timerStore.timer(id: id)?.state == .ringing
 		timerStore.addMinute(id: id)
+		if wasRinging { closeChip(id: id) }
 	}
 
 	@objc private func restartTimer(_ sender: NSMenuItem) {
 		guard let id = sender.representedObject as? UUID else { return }
+		let wasRinging = timerStore.timer(id: id)?.state == .ringing
 		timerStore.restart(id: id)
+		if wasRinging { closeChip(id: id) }
 	}
 
 	@objc private func cancelTimer(_ sender: NSMenuItem) {
 		guard let id = sender.representedObject as? UUID else { return }
 		timerStore.cancel(id: id)
+		closeChip(id: id)
 	}
 
 	@objc private func stopTimerRinging(_ sender: NSMenuItem) {
 		guard let id = sender.representedObject as? UUID else { return }
-		timerStore.stopRinging(id: id)
+		dismissChip(id: id)
 	}
 
 	// MARK: Global hotkey

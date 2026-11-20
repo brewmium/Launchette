@@ -2,15 +2,19 @@ import Cocoa
 
 // MARK: - Alert chip
 
-// Small always-on-top orange card near the menu bar: timer name, "Time's up",
-// and a Stop. Shown when the chime would be inaudible (muted/zero volume) or
-// notifications are unavailable, so a finished timer is never both silent and
-// invisible. Auto-dismissed when ringing ends.
+// Small always-on-top orange card near the menu bar: timer name, "Time's up"
+// with the fire time, and a Stop/Dismiss button. Shown when a timer fires and
+// kept on screen after the chime ends, so every finished timer stays visible
+// until acknowledged. Chips stack downward under the menu bar. Clicking a chip
+// dismisses it; a modifier-click (any of Cmd/Opt/Shift/Ctrl) dismisses all.
 class AlertChip: NSPanel {
 	static let accent = NSColor(red: 0xFF/255.0, green: 0x8A/255.0, blue: 0x00/255.0, alpha: 1.0)
 
 	let timerID: UUID
-	var onStop: ((UUID) -> Void)?
+	// (timerID, dismissAll) -- dismissAll is true when a modifier was held
+	var onDismiss: ((UUID, Bool) -> Void)?
+
+	private var dismissButton: NSButton!
 
 	private static let chipWidth: CGFloat = 300
 	private static let chipHeight: CGFloat = 64
@@ -39,7 +43,7 @@ class AlertChip: NSPanel {
 		card.layer?.cornerRadius = 12
 		contentView?.addSubview(card)
 
-		let titleLabel = NSTextField(labelWithString: "Time's up")
+		let titleLabel = NSTextField(labelWithString: "Time's up (\(TimeFormat.clockString(timer.fireDate)))")
 		titleLabel.font = .systemFont(ofSize: 15, weight: .bold)
 		titleLabel.textColor = .white
 		titleLabel.frame = NSRect(x: 16, y: 34, width: 190, height: 20)
@@ -53,23 +57,22 @@ class AlertChip: NSPanel {
 		nameLabel.lineBreakMode = .byTruncatingTail
 		card.addSubview(nameLabel)
 
-		let stopButton = NSButton(frame: NSRect(x: Self.chipWidth - 76, y: (Self.chipHeight - 28) / 2, width: 60, height: 28))
-		stopButton.isBordered = false
-		stopButton.wantsLayer = true
-		stopButton.layer?.backgroundColor = NSColor.white.cgColor
-		stopButton.layer?.cornerRadius = 14
-		stopButton.attributedTitle = NSAttributedString(
-			string: "Stop",
-			attributes: [
-				.foregroundColor: Self.accent,
-				.font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-			]
-		)
-		stopButton.target = self
-		stopButton.action = #selector(stopClicked)
-		card.addSubview(stopButton)
+		dismissButton = NSButton(frame: NSRect(x: Self.chipWidth - 88, y: (Self.chipHeight - 28) / 2, width: 72, height: 28))
+		dismissButton.isBordered = false
+		dismissButton.wantsLayer = true
+		dismissButton.layer?.backgroundColor = NSColor.white.cgColor
+		dismissButton.layer?.cornerRadius = 14
+		dismissButton.attributedTitle = Self.buttonTitle("Stop")
+		dismissButton.target = self
+		dismissButton.action = #selector(dismissClicked)
+		card.addSubview(dismissButton)
 
-		// Stack under the menu bar at the top right of the menu-bar screen
+		reposition(index: index)
+	}
+
+	// Stack under the menu bar at the top right of the menu-bar screen,
+	// growing downward; called again when chips above are dismissed
+	func reposition(index: Int) {
 		let screen = NSScreen.screens.first ?? NSScreen.main!
 		let sf = screen.visibleFrame
 		let x = sf.maxX - Self.chipWidth - 16
@@ -81,7 +84,32 @@ class AlertChip: NSPanel {
 		orderFrontRegardless()
 	}
 
-	@objc private func stopClicked() {
-		onStop?(timerID)
+	// The chime is over; the chip is now just a "this one finished" record
+	func soundEnded() {
+		dismissButton.attributedTitle = Self.buttonTitle("Dismiss")
+	}
+
+	// Anywhere on the card dismisses, same as the button
+	override func mouseDown(with event: NSEvent) {
+		fireDismiss(modifiers: event.modifierFlags)
+	}
+
+	@objc private func dismissClicked() {
+		fireDismiss(modifiers: NSApp.currentEvent?.modifierFlags ?? [])
+	}
+
+	private func fireDismiss(modifiers: NSEvent.ModifierFlags) {
+		let held = modifiers.intersection([.command, .option, .shift, .control])
+		onDismiss?(timerID, !held.isEmpty)
+	}
+
+	private static func buttonTitle(_ title: String) -> NSAttributedString {
+		NSAttributedString(
+			string: title,
+			attributes: [
+				.foregroundColor: accent,
+				.font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+			]
+		)
 	}
 }
