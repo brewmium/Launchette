@@ -139,15 +139,19 @@ class AppIndex {
 	private func makeEntry(path: String, isCustom: Bool) -> AppEntry? {
 		let url = URL(fileURLWithPath: path)
 		let displayName = url.deletingPathExtension().lastPathComponent
-		let bundle = Bundle(path: path)
+		// Read Info.plist from disk every scan. Bundle(path:) caches one
+		// instance per path for the life of the process, so a rebuilt or
+		// updated app would keep reporting the version first seen.
+		let infoURL = url.appendingPathComponent("Contents/Info.plist")
+		let info = NSDictionary(contentsOf: infoURL) as? [String: Any] ?? [:]
 		// Skip background-only apps (not user-launchable)
-		if bundle?.infoDictionary?["LSBackgroundOnly"] as? Bool == true { return nil }
+		if info["LSBackgroundOnly"] as? Bool == true { return nil }
 
-		let bundleName = bundle?.infoDictionary?["CFBundleDisplayName"] as? String
-			?? bundle?.infoDictionary?["CFBundleName"] as? String
+		let bundleName = info["CFBundleDisplayName"] as? String
+			?? info["CFBundleName"] as? String
 			?? displayName
-		let bundleID = bundle?.bundleIdentifier
-		let version = bundle?.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+		let bundleID = info["CFBundleIdentifier"] as? String
+		let version = info["CFBundleShortVersionString"] as? String ?? ""
 		let icon = NSWorkspace.shared.icon(forFile: path)
 		icon.size = NSSize(width: 48, height: 48)
 
